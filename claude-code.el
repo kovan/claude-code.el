@@ -1,28 +1,56 @@
 ;;; claude-code.el --- Claude Code integration for Emacs -*- lexical-binding: t; -*-
 
-;; Author: Claude Code Emacs Project
+;; Author: kovan <kovan@github>
+;; Maintainer: kovan <kovan@github>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (json "1.5") (project "0.9"))
-;; Keywords: tools, ai
+;; Package-Requires: ((emacs "28.1") (seq "2.0"))
+;; Keywords: tools, ai, convenience
+;; URL: https://github.com/kovan/claude-code.el
+
+;; This file is not part of GNU Emacs.
+
+;; MIT License
+;;
+;; Copyright (c) 2025 kovan
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+;; SOFTWARE.
 
 ;;; Commentary:
 ;;
-;; This package provides Claude Code integration for Emacs, similar to the
-;; VSCode Claude Code extension.  It spawns the `claude` CLI with
-;; --input-format stream-json --output-format stream-json and injects an
-;; Emacs-specific MCP server that gives Claude access to editor state
+;; Claude Code integration for Emacs, similar to the VSCode Claude Code
+;; extension.  Uses your Claude Code subscription (not API keys).
+;;
+;; This package spawns the `claude' CLI with stream-json I/O and injects an
+;; Emacs-native MCP server that gives Claude access to editor state
 ;; (diagnostics, open buffers, selections, etc.).
 ;;
 ;; The MCP server communicates with the main Emacs via a TCP eval server
-;; running inside Emacs — no emacsclient dependency.
+;; running inside Emacs -- no emacsclient dependency.
 ;;
 ;; Usage:
-;;   M-x claude-code  — Start or switch to a Claude Code session
+;;   M-x claude-code  -- Start or switch to a Claude Code session
 
 ;;; Code:
 
 (require 'json)
 (require 'project)
+(require 'seq)
 
 ;; ---------------------------------------------------------------------------
 ;; Customization

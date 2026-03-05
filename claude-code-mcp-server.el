@@ -1,28 +1,24 @@
 ;;; claude-code-mcp-server.el --- MCP server for Claude Code Emacs integration -*- lexical-binding: t; -*-
 
-;; This file is meant to be run as: emacs --batch --load claude-code-mcp-server.el
-;; It implements an MCP (Model Context Protocol) server over stdio that
-;; communicates with the main Emacs instance via a TCP connection.
+;; Author: kovan <kovan@github>
+;; Maintainer: kovan <kovan@github>
+;; Keywords: tools
+;; URL: https://github.com/kovan/claude-code.el
+
+;; This file is part of claude-code.el.
+;; See claude-code.el for license information.
 
 ;;; Commentary:
 ;;
-;; MCP stdio transport: read JSON-RPC lines from stdin, write to stdout.
-;; For tool calls, we connect to a TCP server running inside the main Emacs
-;; (started by claude-code.el) to evaluate expressions and get results.
+;; MCP server that runs as: emacs --batch --load claude-code-mcp-server.el
 ;;
-;; Protocol with main Emacs is simple:
+;; Speaks JSON-RPC over stdio (MCP stdio transport).  For tool calls, it
+;; connects to a TCP eval server running inside the main Emacs (started by
+;; `claude-code.el') to query editor state.
+;;
+;; Protocol with main Emacs:
 ;;   - Send a single line of Elisp to evaluate
 ;;   - Receive the result as a single line back
-;;
-;; Tools exposed:
-;;   - getDiagnostics
-;;   - getOpenBuffers
-;;   - getCurrentSelection
-;;   - openFile
-;;   - openDiff
-;;   - getWorkspaceFolders
-;;   - checkDocumentDirty
-;;   - saveDocument
 
 ;;; Code:
 
@@ -356,7 +352,10 @@ Returns the result as a string."
           (error
            (message "claude-emacs-mcp: parse error: %S" err)))))))
 
-;; Start the server
-(claude-mcp--main-loop)
+(provide 'claude-code-mcp-server)
+
+;; When loaded in batch mode, start the server immediately.
+(when noninteractive
+  (claude-mcp--main-loop))
 
 ;;; claude-code-mcp-server.el ends here
