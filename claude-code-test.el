@@ -535,6 +535,331 @@
     (should (string-match-p "some output" (buffer-string)))
     (should (equal (claude-code--get-input) "my typing"))))
 
+;; ---------------------------------------------------------------------------
+;; Tool confirmation denied
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-open-file-denied ()
+  "Test openFile returns failure when user denies confirmation."
+  (let ((claude-code-confirm-tool-calls t))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil)))
+      (let* ((result (claude-code--open-file "/tmp/some-file"))
+             (parsed (json-read-from-string result)))
+        (should (equal (cdr (assq 'success parsed)) :json-false))
+        (should (string-match-p "denied" (cdr (assq 'message parsed))))))))
+
+(ert-deftest claude-code-test-save-document-denied ()
+  "Test saveDocument returns failure when user denies confirmation."
+  (let ((temp-file (make-temp-file "claude-test-"))
+        (claude-code-confirm-tool-calls t))
+    (unwind-protect
+        (progn
+          (find-file-noselect temp-file)
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil)))
+            (let* ((result (claude-code--save-document temp-file))
+                   (parsed (json-read-from-string result)))
+              (should (equal (cdr (assq 'success parsed)) :json-false))
+              (should (string-match-p "denied" (cdr (assq 'message parsed)))))))
+      (when-let ((buf (find-buffer-visiting temp-file)))
+        (kill-buffer buf))
+      (delete-file temp-file))))
+
+;; ---------------------------------------------------------------------------
+;; save-document success
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-save-document-success ()
+  "Test saveDocument actually saves a modified buffer."
+  (let ((temp-file (make-temp-file "claude-test-"))
+        (claude-code-confirm-tool-calls nil))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file (insert "original"))
+          (let ((buf (find-file-noselect temp-file)))
+            (with-current-buffer buf
+              (goto-char (point-max))
+              (insert " modified")
+              (should (buffer-modified-p)))
+            (let* ((result (claude-code--save-document temp-file))
+                   (parsed (json-read-from-string result)))
+              (should (equal (cdr (assq 'success parsed)) t))
+              (with-current-buffer buf
+                (should-not (buffer-modified-p))))))
+      (when-let ((buf (find-buffer-visiting temp-file)))
+        (kill-buffer buf))
+      (delete-file temp-file))))
+
+;; ---------------------------------------------------------------------------
+;; open-file with column
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-open-file-at-line-and-column ()
+  "Test openFile navigates to correct line and column."
+  (let ((temp-file (make-temp-file "claude-test-"))
+        (claude-code-confirm-tool-calls nil))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "abcdef\nghijkl\nmnopqr\n"))
+          (claude-code--open-file temp-file 2 4)
+          (let ((buf (find-buffer-visiting temp-file)))
+            (should buf)
+            (with-current-buffer buf
+              (should (= (line-number-at-pos) 2))
+              (should (= (current-column) 3)))))
+      (when-let ((buf (find-buffer-visiting temp-file)))
+        (kill-buffer buf))
+      (delete-file temp-file))))
+
+;; ---------------------------------------------------------------------------
+;; open-diff
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-open-diff-no-content ()
+  "Test openDiff returns failure when no new file or contents provided."
+  (let ((claude-code-confirm-tool-calls nil))
+    (let* ((result (claude-code--open-diff "/tmp/some-file"))
+           (parsed (json-read-from-string result)))
+      (should (equal (cdr (assq 'success parsed)) :json-false)))))
+
+;; ---------------------------------------------------------------------------
+;; get-current-selection with active region
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-get-current-selection-with-region ()
+  "Test getCurrentSelection returns selected text."
+  (with-temp-buffer
+    (insert "line one\nline two\nline three\n")
+    (set-window-buffer (selected-window) (current-buffer))
+    (goto-char (point-min))
+    (set-mark (point))
+    (forward-line 2)
+    (activate-mark)
+    (let* ((result (claude-code--get-current-selection))
+           (parsed (json-read-from-string result)))
+      (should (equal (cdr (assq 'text parsed)) "line one\nline two\n"))
+      (should (equal (cdr (assq 'startLine parsed)) 1))
+      (should (equal (cdr (assq 'endLine parsed)) 3)))))
+
+;; ---------------------------------------------------------------------------
+;; @ mention: @buffer
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-expand-mentions-buffer ()
+  "Test @buffer expansion includes buffer contents."
+  (let ((claude-code--origin-buffer
+         (generate-new-buffer " *test-origin*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer claude-code--origin-buffer
+            (insert "buffer content xyz"))
+          (let ((result (claude-code--expand-mentions "check @buffer")))
+            (should (string-match-p "buffer content xyz" result))
+            (should-not (string-match-p "@buffer" result))))
+      (kill-buffer claude-code--origin-buffer))))
+
+;; ---------------------------------------------------------------------------
+;; @ mention: @selection with active region
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-expand-mentions-selection-with-region ()
+  "Test @selection expansion with an active region."
+  (let ((claude-code--origin-buffer
+         (generate-new-buffer " *test-origin*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer claude-code--origin-buffer
+            (insert "hello world")
+            (set-mark 1)
+            (goto-char 6)
+            (activate-mark))
+          (let ((result (claude-code--expand-mentions "explain @selection")))
+            (should (string-match-p "hello" result))
+            (should-not (string-match-p "@selection" result))))
+      (kill-buffer claude-code--origin-buffer))))
+
+;; ---------------------------------------------------------------------------
+;; Context capture
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-capture-context-with-file ()
+  "Test context capture includes file path and line number."
+  (let ((temp-file (make-temp-file "claude-test-")))
+    (unwind-protect
+        (progn
+          (find-file temp-file)
+          (insert "line1\nline2\n")
+          (goto-char (point-min))
+          (forward-line 1)
+          (let ((claude-code--origin-buffer (current-buffer)))
+            (let ((ctx (claude-code--capture-context)))
+              (should ctx)
+              (should (string-match-p temp-file ctx))
+              (should (string-match-p "line 2" ctx)))))
+      (when-let ((buf (find-buffer-visiting temp-file)))
+        (set-buffer-modified-p nil)
+        (kill-buffer buf))
+      (delete-file temp-file))))
+
+(ert-deftest claude-code-test-capture-context-nil-when-no-origin ()
+  "Test context capture returns nil when no origin buffer."
+  (let ((claude-code--origin-buffer nil))
+    (should-not (claude-code--capture-context))))
+
+;; ---------------------------------------------------------------------------
+;; CLI args
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-build-cli-args-default ()
+  "Test CLI args include required flags."
+  (let ((claude-code--eval-server-port 9999)
+        (claude-code-model nil)
+        (claude-code-permission-mode "default"))
+    (let ((args (claude-code--build-cli-args)))
+      (should (member "--output-format" args))
+      (should (member "stream-json" args))
+      (should (member "--input-format" args))
+      (should (member "--verbose" args))
+      (should (member "--mcp-config" args))
+      (should (member "--permission-mode" args))
+      (should (member "default" args))
+      ;; No --model when nil
+      (should-not (member "--model" args)))))
+
+(ert-deftest claude-code-test-build-cli-args-with-model ()
+  "Test CLI args include --model when set."
+  (let ((claude-code--eval-server-port 9999)
+        (claude-code-model "opus")
+        (claude-code-permission-mode "default"))
+    (let ((args (claude-code--build-cli-args)))
+      (should (member "--model" args))
+      (should (member "opus" args)))))
+
+;; ---------------------------------------------------------------------------
+;; Stream: tool_result in user message
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-handle-tool-result ()
+  "Test that tool_result messages display truncated content."
+  (claude-code-test--with-chat-buffer
+    (claude-code--handle-stream-message
+     '((type . "user")
+       (message . ((content . [((type . "tool_result")
+                                (content . "result data here"))])))))
+    (should (string-match-p "Tool result:.*result data here" (buffer-string)))))
+
+;; ---------------------------------------------------------------------------
+;; MCP resources/list and prompts/list
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-mcp-resources-list ()
+  "Test MCP resources/list returns empty list."
+  (let* ((input-file (make-temp-file "mcp-test-" nil ".jsonl"))
+         (script-path (expand-file-name "claude-code-mcp-server.el"
+                                        (file-name-directory
+                                         (or load-file-name
+                                             buffer-file-name
+                                             default-directory)))))
+    (unwind-protect
+        (progn
+          (with-temp-file input-file
+            (insert "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\",\"params\":{}}\n"))
+          (let ((buf (generate-new-buffer " *mcp-test*")))
+            (unwind-protect
+                (progn
+                  (call-process "emacs" input-file buf nil
+                                "--batch" "--load" script-path)
+                  (with-current-buffer buf
+                    (let* ((output (string-trim (buffer-string)))
+                           (resp (json-read-from-string output))
+                           (result (cdr (assq 'result resp))))
+                      (should (equal (cdr (assq 'id resp)) 1))
+                      (should (equal (cdr (assq 'resources result)) [])))))
+              (kill-buffer buf))))
+      (delete-file input-file))))
+
+(ert-deftest claude-code-test-mcp-prompts-list ()
+  "Test MCP prompts/list returns empty list."
+  (let* ((input-file (make-temp-file "mcp-test-" nil ".jsonl"))
+         (script-path (expand-file-name "claude-code-mcp-server.el"
+                                        (file-name-directory
+                                         (or load-file-name
+                                             buffer-file-name
+                                             default-directory)))))
+    (unwind-protect
+        (progn
+          (with-temp-file input-file
+            (insert "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"prompts/list\",\"params\":{}}\n"))
+          (let ((buf (generate-new-buffer " *mcp-test*")))
+            (unwind-protect
+                (progn
+                  (call-process "emacs" input-file buf nil
+                                "--batch" "--load" script-path)
+                  (with-current-buffer buf
+                    (let* ((output (string-trim (buffer-string)))
+                           (resp (json-read-from-string output))
+                           (result (cdr (assq 'result resp))))
+                      (should (equal (cdr (assq 'id resp)) 2))
+                      (should (equal (cdr (assq 'prompts result)) [])))))
+              (kill-buffer buf))))
+      (delete-file input-file))))
+
+;; ---------------------------------------------------------------------------
+;; MCP config with model
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-mcp-config-has-correct-args ()
+  "Test MCP config includes --batch and --load with correct script."
+  (let ((claude-code--eval-server-port 5555))
+    (let ((config-file (claude-code--mcp-config)))
+      (unwind-protect
+          (let* ((json-str (with-temp-buffer
+                             (insert-file-contents config-file)
+                             (buffer-string)))
+                 (parsed (json-read-from-string json-str))
+                 (servers (cdr (assq 'mcpServers parsed)))
+                 (emacs-server (cdr (assq 'claude-emacs servers)))
+                 (args (cdr (assq 'args emacs-server))))
+            (should (vectorp args))
+            (should (equal (aref args 0) "--batch"))
+            (should (equal (aref args 1) "--load")))
+        (delete-file config-file)))))
+
+;; ---------------------------------------------------------------------------
+;; Multiple output insertions
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-multiple-outputs-preserve-input ()
+  "Test that multiple output insertions preserve user input."
+  (claude-code-test--with-chat-buffer
+    (goto-char (point-max))
+    (insert "work in progress")
+    (claude-code--insert-output "first output\n")
+    (claude-code--insert-output "second output\n")
+    (should (string-match-p "first output" (buffer-string)))
+    (should (string-match-p "second output" (buffer-string)))
+    (should (equal (claude-code--get-input) "work in progress"))))
+
+;; ---------------------------------------------------------------------------
+;; @buffer does not match @buffers
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-expand-mentions-buffer-vs-buffers ()
+  "Test that @buffer does not interfere with @buffers."
+  (let ((claude-code--origin-buffer
+         (generate-new-buffer " *test-origin*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer claude-code--origin-buffer
+            (insert "origin content"))
+          ;; Only @buffers, not @buffer
+          (let ((result (claude-code--expand-mentions "list @buffers please")))
+            (should (string-match-p "Open buffers:" result))
+            (should-not (string-match-p "@buffers" result))
+            ;; Should NOT contain the origin buffer contents
+            (should-not (string-match-p "origin content" result))))
+      (kill-buffer claude-code--origin-buffer))))
+
 (provide 'claude-code-test)
 
 ;;; claude-code-test.el ends here
