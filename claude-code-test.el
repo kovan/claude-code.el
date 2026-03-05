@@ -120,8 +120,7 @@
 
 (ert-deftest claude-code-test-open-file ()
   "Test openFile opens a file and returns success."
-  (let ((temp-file (make-temp-file "claude-test-"))
-        (claude-code-confirm-tool-calls nil))
+  (let ((temp-file (make-temp-file "claude-test-")))
     (unwind-protect
         (let* ((result (claude-code--open-file temp-file))
                (parsed (json-read-from-string result)))
@@ -135,8 +134,7 @@
 
 (ert-deftest claude-code-test-open-file-at-line ()
   "Test openFile navigates to the correct line."
-  (let ((temp-file (make-temp-file "claude-test-"))
-        (claude-code-confirm-tool-calls nil))
+  (let ((temp-file (make-temp-file "claude-test-")))
     (unwind-protect
         (progn
           (with-temp-file temp-file
@@ -549,42 +547,12 @@
     (should (equal (claude-code--get-input) "my typing"))))
 
 ;; ---------------------------------------------------------------------------
-;; Tool confirmation denied
-;; ---------------------------------------------------------------------------
-
-(ert-deftest claude-code-test-open-file-denied ()
-  "Test openFile returns failure when user denies confirmation."
-  (let ((claude-code-confirm-tool-calls t))
-    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil)))
-      (let* ((result (claude-code--open-file "/tmp/some-file"))
-             (parsed (json-read-from-string result)))
-        (should (equal (cdr (assq 'success parsed)) :json-false))
-        (should (string-match-p "denied" (cdr (assq 'message parsed))))))))
-
-(ert-deftest claude-code-test-save-document-denied ()
-  "Test saveDocument returns failure when user denies confirmation."
-  (let ((temp-file (make-temp-file "claude-test-"))
-        (claude-code-confirm-tool-calls t))
-    (unwind-protect
-        (progn
-          (find-file-noselect temp-file)
-          (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil)))
-            (let* ((result (claude-code--save-document temp-file))
-                   (parsed (json-read-from-string result)))
-              (should (equal (cdr (assq 'success parsed)) :json-false))
-              (should (string-match-p "denied" (cdr (assq 'message parsed)))))))
-      (when-let ((buf (find-buffer-visiting temp-file)))
-        (kill-buffer buf))
-      (delete-file temp-file))))
-
-;; ---------------------------------------------------------------------------
 ;; save-document success
 ;; ---------------------------------------------------------------------------
 
 (ert-deftest claude-code-test-save-document-success ()
   "Test saveDocument actually saves a modified buffer."
-  (let ((temp-file (make-temp-file "claude-test-"))
-        (claude-code-confirm-tool-calls nil))
+  (let ((temp-file (make-temp-file "claude-test-")))
     (unwind-protect
         (progn
           (with-temp-file temp-file (insert "original"))
@@ -608,8 +576,7 @@
 
 (ert-deftest claude-code-test-open-file-at-line-and-column ()
   "Test openFile navigates to correct line and column."
-  (let ((temp-file (make-temp-file "claude-test-"))
-        (claude-code-confirm-tool-calls nil))
+  (let ((temp-file (make-temp-file "claude-test-")))
     (unwind-protect
         (progn
           (with-temp-file temp-file

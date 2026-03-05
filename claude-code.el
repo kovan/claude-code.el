@@ -80,13 +80,6 @@
                  (const "bypassPermissions"))
   :group 'claude-code)
 
-(defcustom claude-code-confirm-tool-calls t
-  "Whether to ask for confirmation before MCP tools modify editor state.
-When non-nil, tools like openFile, openDiff, and saveDocument will
-prompt for approval via `y-or-n-p'."
-  :type 'boolean
-  :group 'claude-code)
-
 (defcustom claude-code-mcp-server-script
   (expand-file-name "claude-code-mcp-server.el"
                     (file-name-directory (or load-file-name buffer-file-name
@@ -159,21 +152,16 @@ Returns the port number."
     (setq existing (concat existing output))
     (while (string-match "\n" existing)
       (let* ((pos (match-end 0))
-             (line (substring existing 0 (1- pos)))
-             (client proc))
+             (line (substring existing 0 (1- pos))))
         (setq existing (substring existing pos))
-        ;; Defer eval via timer so y-or-n-p and other interactive
-        ;; functions work (they need the event loop, which is blocked
-        ;; inside a process filter).
-        (run-at-time 0 nil
-                     (lambda ()
-                       (let ((result (condition-case err
-                                         (let ((val (eval (read line))))
-                                           (if (stringp val) val (prin1-to-string val)))
-                                       (error (format "{\"error\": %S}"
-                                                      (error-message-string err))))))
-                         (when (process-live-p client)
-                           (process-send-string client (concat result "\n"))))))))
+        ;; Evaluate and respond
+        (let ((result (condition-case err
+                          (let ((val (eval (read line))))
+                            (if (stringp val) val (prin1-to-string val)))
+                        (error (format "{\"error\": %S}"
+                                       (error-message-string err))))))
+          (when (process-live-p proc)
+            (process-send-string proc (concat result "\n"))))))
     (puthash proc existing claude-code--eval-client-buffers)))
 
 (defun claude-code--eval-server-sentinel (proc event)
@@ -246,39 +234,41 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
         (json-encode `((success . :json-false)
                        (message . "No active region")))))))
 
+(defun claude-code--notify-tool-action (action)
+  "Show ACTION in the chat buffer as a notification."
+  (when-let ((buf (get-buffer claude-code--buffer-name)))
+    (with-current-buffer buf
+      (claude-code--insert-output
+       (propertize (format "[%s]\n" action)
+                   'face 'claude-code-tool-face)))))
+
 (defun claude-code--open-file (file-path &optional line column)
   "Open FILE-PATH, optionally at LINE and COLUMN."
-  (if (and claude-code-confirm-tool-calls
-           (not (y-or-n-p (format "Claude wants to open %s.  Allow? " file-path))))
-      (json-encode `((success . :json-false)
-                     (message . "User denied opening file")))
-    (find-file file-path)
-    (when line
-      (goto-char (point-min))
-      (forward-line (1- line))
-      (when column
-        (forward-char (1- column))))
-    (json-encode `((success . t)
-                   (filePath . ,file-path)))))
+  (claude-code--notify-tool-action (format "Opening %s%s" file-path
+                                           (if line (format ":%d" line) "")))
+  (find-file file-path)
+  (when line
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (when column
+      (forward-char (1- column))))
+  (json-encode `((success . t)
+                 (filePath . ,file-path))))
 
 (defun claude-code--open-diff (old-file-path &optional new-file-path new-file-contents)
   "Open an ediff session.  Compare OLD-FILE-PATH with NEW-FILE-PATH or NEW-FILE-CONTENTS."
-  (if (and claude-code-confirm-tool-calls
-           (not (y-or-n-p (format "Claude wants to show a diff for %s.  Allow? "
-                                  old-file-path))))
+  (let ((file-b (if new-file-contents
+                    (let ((temp (make-temp-file "claude-diff-")))
+                      (with-temp-file temp (insert new-file-contents))
+                      temp)
+                  new-file-path)))
+    (if file-b
+        (progn
+          (claude-code--notify-tool-action (format "Diff: %s" old-file-path))
+          (ediff-files old-file-path file-b)
+          (json-encode `((success . t))))
       (json-encode `((success . :json-false)
-                     (message . "User denied diff")))
-    (let ((file-b (if new-file-contents
-                      (let ((temp (make-temp-file "claude-diff-")))
-                        (with-temp-file temp (insert new-file-contents))
-                        temp)
-                    new-file-path)))
-      (if file-b
-          (progn
-            (ediff-files old-file-path file-b)
-            (json-encode `((success . t))))
-        (json-encode `((success . :json-false)
-                       (message . "No new file or contents to compare")))))))
+                     (message . "No new file or contents to compare"))))))
 
 (defun claude-code--get-workspace-folders ()
   "Return JSON array of project root directories."
@@ -300,18 +290,13 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
 (defun claude-code--save-document (file-path)
   "Save the buffer visiting FILE-PATH."
   (let ((buf (find-buffer-visiting file-path)))
-    (cond
-     ((not buf)
-      (json-encode `((success . :json-false)
-                     (message . ,(format "No buffer visiting %s" file-path)))))
-     ((and claude-code-confirm-tool-calls
-           (not (y-or-n-p (format "Claude wants to save %s.  Allow? " file-path))))
-      (json-encode `((success . :json-false)
-                     (message . "User denied save"))))
-     (t
+    (if (not buf)
+        (json-encode `((success . :json-false)
+                       (message . ,(format "No buffer visiting %s" file-path))))
+      (claude-code--notify-tool-action (format "Saving %s" file-path))
       (with-current-buffer buf
         (save-buffer)
-        (json-encode `((success . t) (filePath . ,file-path))))))))
+        (json-encode `((success . t) (filePath . ,file-path)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; MCP config generation

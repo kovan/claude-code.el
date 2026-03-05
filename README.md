@@ -106,15 +106,9 @@ You can also use `@` mentions for explicit context:
 | `@file:/path/to/file` | Contents of a specific file |
 | `@buffers` | List of all open file-visiting buffers |
 
-### Tool confirmations
+### Tool notifications
 
-By default, Claude will ask for your approval (via `y-or-n-p`) before modifying editor state -- opening files, showing diffs, or saving buffers. Diffs are shown using `ediff`.
-
-To disable confirmations:
-
-```elisp
-(setq claude-code-confirm-tool-calls nil)
-```
+When Claude uses MCP tools that modify editor state (opening files, showing diffs, saving buffers), actions are logged in the chat buffer. Diffs are shown using `ediff`. File edit permissions are controlled by the CLI's `--permission-mode` setting.
 
 ## Configuration
 
@@ -127,9 +121,6 @@ To disable confirmations:
 
 ;; Custom claude CLI path
 (setq claude-code-cli-program "/usr/local/bin/claude")
-
-;; Don't ask before opening files/diffs/saving (default: t)
-(setq claude-code-confirm-tool-calls nil)
 ```
 
 ## Running Tests
