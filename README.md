@@ -7,21 +7,21 @@ Claude Code integration for Emacs. Uses your Claude Code subscription (same as t
 This package spawns the `claude` CLI as a subprocess with `--input-format stream-json --output-format stream-json` and injects an Emacs-native MCP server that gives Claude access to your editor state.
 
 ```
-┌─────────────────────────────────────────────────┐
-│                      Emacs                      │
-│                                                 │
-│  ┌────────────────┐     ┌────────────────────┐  │
-│  │  claude-code    │     │  TCP eval server   │  │
-│  │  (chat buffer,  │     │  (port auto)       │  │
-│  │   stream-json)  │     │                    │  │
-│  └───────┬────────┘     └─────────▲──────────┘  │
-│          │ stdin/stdout           │ TCP          │
-│          ▼                        │              │
-│  ┌──────────────┐     ┌───────────┴──────────┐  │
-│  │  claude CLI   │────▶│  MCP server           │  │
-│  │               │     │  (emacs --batch)     │  │
-│  └──────────────┘     └──────────────────────┘  │
-└─────────────────────────────────────────────────┘
++--------------------------------------------------+
+|                      Emacs                       |
+|                                                  |
+|  +-----------------+    +---------------------+  |
+|  | claude-code     |    | TCP eval server     |  |
+|  | (chat buffer,   |    | (port auto)         |  |
+|  |  stream-json)   |    |                     |  |
+|  +--------+--------+    +----------^----------+  |
+|           | stdin/stdout           | TCP          |
+|           v                        |              |
+|  +-----------------+    +----------+----------+  |
+|  | claude CLI      |--->| MCP server          |  |
+|  |                 |    | (emacs --batch)     |  |
+|  +-----------------+    +---------------------+  |
++--------------------------------------------------+
 ```
 
 The MCP server runs as a separate `emacs --batch` process (spawned by the CLI) and communicates back to the main Emacs via a lightweight TCP eval server. No `emacsclient` dependency.
