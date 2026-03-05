@@ -159,16 +159,21 @@ Returns the port number."
     (setq existing (concat existing output))
     (while (string-match "\n" existing)
       (let* ((pos (match-end 0))
-             (line (substring existing 0 (1- pos))))
+             (line (substring existing 0 (1- pos)))
+             (client proc))
         (setq existing (substring existing pos))
-        ;; Evaluate and respond
-        (let ((result (condition-case err
-                          (let ((val (eval (read line))))
-                            (if (stringp val) val (prin1-to-string val)))
-                        (error (format "{\"error\": %S}"
-                                       (error-message-string err))))))
-          (when (process-live-p proc)
-            (process-send-string proc (concat result "\n"))))))
+        ;; Defer eval via timer so y-or-n-p and other interactive
+        ;; functions work (they need the event loop, which is blocked
+        ;; inside a process filter).
+        (run-at-time 0 nil
+                     (lambda ()
+                       (let ((result (condition-case err
+                                         (let ((val (eval (read line))))
+                                           (if (stringp val) val (prin1-to-string val)))
+                                       (error (format "{\"error\": %S}"
+                                                      (error-message-string err))))))
+                         (when (process-live-p client)
+                           (process-send-string client (concat result "\n"))))))))
     (puthash proc existing claude-code--eval-client-buffers)))
 
 (defun claude-code--eval-server-sentinel (proc event)
@@ -360,6 +365,26 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
                    (json-read-from-string line))
                 (error nil)))))))))
 
+(defun claude-code--tool-use-summary (name input)
+  "Return a human-readable summary for tool NAME with INPUT args."
+  (pcase name
+    ("Read" (format "%s" (or (cdr (assq 'file_path input)) "")))
+    ("Write" (format "%s" (or (cdr (assq 'file_path input)) "")))
+    ("Edit" (format "%s" (or (cdr (assq 'file_path input)) "")))
+    ("MultiEdit" (format "%s" (or (cdr (assq 'file_path input)) "")))
+    ("Bash" (let ((cmd (or (cdr (assq 'command input)) "")))
+              (truncate-string-to-width cmd 80)))
+    ("Glob" (format "%s" (or (cdr (assq 'pattern input)) "")))
+    ("Grep" (format "%s" (or (cdr (assq 'pattern input)) "")))
+    ("LS" (format "%s" (or (cdr (assq 'path input)) "")))
+    ("getDiagnostics" (let ((uri (cdr (assq 'uri input))))
+                        (if uri (format "%s" uri) "all files")))
+    ("openFile" (format "%s" (or (cdr (assq 'filePath input)) "")))
+    ("openDiff" (format "%s" (or (cdr (assq 'old_file_path input)) "")))
+    ("saveDocument" (format "%s" (or (cdr (assq 'filePath input)) "")))
+    ("checkDocumentDirty" (format "%s" (or (cdr (assq 'filePath input)) "")))
+    (_ nil)))
+
 (defun claude-code--handle-stream-message (msg)
   "Handle a single stream-json MSG from Claude CLI."
   (let ((type (cdr (assq 'type msg)))
@@ -379,9 +404,12 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
                         (claude-code--insert-output
                          (propertize text 'face 'claude-code-assistant-face)))))
                    ("tool_use"
-                    (let ((name (cdr (assq 'name block))))
+                    (let* ((name (cdr (assq 'name block)))
+                           (input (cdr (assq 'input block)))
+                           (detail (claude-code--tool-use-summary name input)))
                       (claude-code--insert-output
-                       (propertize (format "\n[Tool: %s]\n" name)
+                       (propertize (format "\n[Tool: %s%s]\n" name
+                                          (if detail (concat " — " detail) ""))
                                    'face 'claude-code-tool-face))))))))))
         ("user"
          (let* ((message (cdr (assq 'message msg)))
@@ -600,7 +628,8 @@ Type at the prompt and press RET to send.  Use C-j for newlines.
 
 \\{claude-code-mode-map}"
   (setq-local claude-code--partial-line "")
-  (setq-local claude-code--input-marker (make-marker)))
+  (setq-local claude-code--input-marker (make-marker))
+  (visual-line-mode 1))
 
 (defun claude-code--insert-output (text)
   "Insert TEXT into the output area (above the input prompt)."

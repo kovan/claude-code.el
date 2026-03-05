@@ -422,15 +422,28 @@
     (should (string-match-p "Hello from Claude!" (buffer-string)))))
 
 (ert-deftest claude-code-test-handle-tool-use ()
-  "Test that tool_use messages show the tool name."
+  "Test that tool_use messages show the tool name and details."
   (claude-code-test--with-chat-buffer
     (claude-code--handle-stream-message
      '((type . "assistant")
        (message . ((content . [((type . "tool_use")
-                                (name . "getOpenBuffers")
+                                (name . "Read")
                                 (id . "tool_123")
-                                (input . ()))])))))
-    (should (string-match-p "\\[Tool: getOpenBuffers\\]" (buffer-string)))))
+                                (input . ((file_path . "/tmp/foo.el"))))])))))
+    (should (string-match-p "\\[Tool: Read" (buffer-string)))
+    (should (string-match-p "/tmp/foo.el" (buffer-string)))))
+
+(ert-deftest claude-code-test-tool-use-summary ()
+  "Test tool use summary generation."
+  (should (equal (claude-code--tool-use-summary "Read" '((file_path . "/tmp/x")))
+                 "/tmp/x"))
+  (should (equal (claude-code--tool-use-summary "Bash" '((command . "ls -la")))
+                 "ls -la"))
+  (should (equal (claude-code--tool-use-summary "openFile" '((filePath . "/tmp/y")))
+                 "/tmp/y"))
+  (should (equal (claude-code--tool-use-summary "getDiagnostics" nil)
+                 "all files"))
+  (should-not (claude-code--tool-use-summary "unknownTool" nil)))
 
 (ert-deftest claude-code-test-handle-result ()
   "Test that result messages show the done separator."
