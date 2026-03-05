@@ -77,11 +77,43 @@ In `config.el`:
 
 ## Usage
 
-```
-M-x claude-code       Start a Claude Code session
-C-c C-c               Send a message
-C-c C-k               Interrupt current operation
-C-c C-q               Quit the session
+1. Open a source file you want to work with
+2. Optionally select a region of code for context
+3. `M-x claude-code`
+4. Type at the prompt and press `RET` to send
+
+### Key bindings
+
+| Key | Action |
+|-----|--------|
+| `RET` | Send message |
+| `C-j` | Insert newline (for multi-line input) |
+| `C-c C-c` | Send message (alternative) |
+| `C-c C-k` | Interrupt current operation |
+| `C-c C-q` | Quit the session |
+| `C-c C-n` | Start a new session |
+
+### Context
+
+Context from your current buffer is automatically attached when you send a message (file path, line number, and active selection).
+
+You can also use `@` mentions for explicit context:
+
+| Mention | Description |
+|---------|-------------|
+| `@buffer` | Contents of the current buffer (truncated at 10k chars) |
+| `@selection` | The active region in the origin buffer |
+| `@file:/path/to/file` | Contents of a specific file |
+| `@buffers` | List of all open file-visiting buffers |
+
+### Tool confirmations
+
+By default, Claude will ask for your approval (via `y-or-n-p`) before modifying editor state -- opening files, showing diffs, or saving buffers. Diffs are shown using `ediff`.
+
+To disable confirmations:
+
+```elisp
+(setq claude-code-confirm-tool-calls nil)
 ```
 
 ## Configuration
@@ -95,6 +127,9 @@ C-c C-q               Quit the session
 
 ;; Custom claude CLI path
 (setq claude-code-cli-program "/usr/local/bin/claude")
+
+;; Don't ask before opening files/diffs/saving (default: t)
+(setq claude-code-confirm-tool-calls nil)
 ```
 
 ## Running Tests

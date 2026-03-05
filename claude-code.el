@@ -80,6 +80,13 @@
                  (const "bypassPermissions"))
   :group 'claude-code)
 
+(defcustom claude-code-confirm-tool-calls t
+  "Whether to ask for confirmation before MCP tools modify editor state.
+When non-nil, tools like openFile, openDiff, and saveDocument will
+prompt for approval via `y-or-n-p'."
+  :type 'boolean
+  :group 'claude-code)
+
 (defcustom claude-code-mcp-server-script
   (expand-file-name "claude-code-mcp-server.el"
                     (file-name-directory (or load-file-name buffer-file-name
@@ -236,26 +243,37 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
 
 (defun claude-code--open-file (file-path &optional line column)
   "Open FILE-PATH, optionally at LINE and COLUMN."
-  (find-file file-path)
-  (when line
-    (goto-char (point-min))
-    (forward-line (1- line))
-    (when column
-      (forward-char (1- column))))
-  (json-encode `((success . t)
-                 (filePath . ,file-path))))
+  (if (and claude-code-confirm-tool-calls
+           (not (y-or-n-p (format "Claude wants to open %s.  Allow? " file-path))))
+      (json-encode `((success . :json-false)
+                     (message . "User denied opening file")))
+    (find-file file-path)
+    (when line
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (when column
+        (forward-char (1- column))))
+    (json-encode `((success . t)
+                   (filePath . ,file-path)))))
 
 (defun claude-code--open-diff (old-file-path &optional new-file-path new-file-contents)
-  "Open a diff.  Compare OLD-FILE-PATH with NEW-FILE-PATH or NEW-FILE-CONTENTS."
-  (if new-file-contents
-      (let ((temp-file (make-temp-file "claude-diff-")))
-        (with-temp-file temp-file
-          (insert new-file-contents))
-        (diff old-file-path temp-file nil 'noasync)
-        (json-encode `((success . t))))
-    (when new-file-path
-      (diff old-file-path new-file-path nil 'noasync)
-      (json-encode `((success . t))))))
+  "Open an ediff session.  Compare OLD-FILE-PATH with NEW-FILE-PATH or NEW-FILE-CONTENTS."
+  (if (and claude-code-confirm-tool-calls
+           (not (y-or-n-p (format "Claude wants to show a diff for %s.  Allow? "
+                                  old-file-path))))
+      (json-encode `((success . :json-false)
+                     (message . "User denied diff")))
+    (let ((file-b (if new-file-contents
+                      (let ((temp (make-temp-file "claude-diff-")))
+                        (with-temp-file temp (insert new-file-contents))
+                        temp)
+                    new-file-path)))
+      (if file-b
+          (progn
+            (ediff-files old-file-path file-b)
+            (json-encode `((success . t))))
+        (json-encode `((success . :json-false)
+                       (message . "No new file or contents to compare")))))))
 
 (defun claude-code--get-workspace-folders ()
   "Return JSON array of project root directories."
@@ -277,12 +295,18 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
 (defun claude-code--save-document (file-path)
   "Save the buffer visiting FILE-PATH."
   (let ((buf (find-buffer-visiting file-path)))
-    (if buf
-        (with-current-buffer buf
-          (save-buffer)
-          (json-encode `((success . t) (filePath . ,file-path))))
+    (cond
+     ((not buf)
       (json-encode `((success . :json-false)
-                     (message . ,(format "No buffer visiting %s" file-path)))))))
+                     (message . ,(format "No buffer visiting %s" file-path)))))
+     ((and claude-code-confirm-tool-calls
+           (not (y-or-n-p (format "Claude wants to save %s.  Allow? " file-path))))
+      (json-encode `((success . :json-false)
+                     (message . "User denied save"))))
+     (t
+      (with-current-buffer buf
+        (save-buffer)
+        (json-encode `((success . t) (filePath . ,file-path))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; MCP config generation

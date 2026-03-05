@@ -120,7 +120,8 @@
 
 (ert-deftest claude-code-test-open-file ()
   "Test openFile opens a file and returns success."
-  (let ((temp-file (make-temp-file "claude-test-")))
+  (let ((temp-file (make-temp-file "claude-test-"))
+        (claude-code-confirm-tool-calls nil))
     (unwind-protect
         (let* ((result (claude-code--open-file temp-file))
                (parsed (json-read-from-string result)))
@@ -134,7 +135,8 @@
 
 (ert-deftest claude-code-test-open-file-at-line ()
   "Test openFile navigates to the correct line."
-  (let ((temp-file (make-temp-file "claude-test-")))
+  (let ((temp-file (make-temp-file "claude-test-"))
+        (claude-code-confirm-tool-calls nil))
     (unwind-protect
         (progn
           (with-temp-file temp-file
