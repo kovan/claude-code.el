@@ -234,18 +234,8 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
         (json-encode `((success . :json-false)
                        (message . "No active region")))))))
 
-(defun claude-code--notify-tool-action (action)
-  "Show ACTION in the chat buffer as a notification."
-  (when-let ((buf (get-buffer claude-code--buffer-name)))
-    (with-current-buffer buf
-      (claude-code--insert-output
-       (propertize (format "[%s]\n" action)
-                   'face 'claude-code-tool-face)))))
-
 (defun claude-code--open-file (file-path &optional line column)
   "Open FILE-PATH, optionally at LINE and COLUMN."
-  (claude-code--notify-tool-action (format "Opening %s%s" file-path
-                                           (if line (format ":%d" line) "")))
   (find-file file-path)
   (when line
     (goto-char (point-min))
@@ -264,7 +254,6 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
                   new-file-path)))
     (if file-b
         (progn
-          (claude-code--notify-tool-action (format "Diff: %s" old-file-path))
           (ediff-files old-file-path file-b)
           (json-encode `((success . t))))
       (json-encode `((success . :json-false)
@@ -293,7 +282,6 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
     (if (not buf)
         (json-encode `((success . :json-false)
                        (message . ,(format "No buffer visiting %s" file-path))))
-      (claude-code--notify-tool-action (format "Saving %s" file-path))
       (with-current-buffer buf
         (save-buffer)
         (json-encode `((success . t) (filePath . ,file-path)))))))
@@ -702,11 +690,11 @@ Remembers the buffer you were in so it can provide context to Claude."
   ;; Remember where the user came from
   (setq claude-code--origin-buffer (current-buffer))
   ;; If we already have a live session, just switch to it
-  (when (and claude-code--process (process-live-p claude-code--process))
-    (pop-to-buffer claude-code--buffer-name)
-    (goto-char (point-max))
-    (message "Session active.  Type at the prompt and press RET to send.")
-    (cl-return-from claude-code))
+  (if (and claude-code--process (process-live-p claude-code--process))
+      (progn
+        (pop-to-buffer claude-code--buffer-name)
+        (goto-char (point-max))
+        (message "Session active.  Type at the prompt and press RET to send."))
   ;; Start the TCP eval server
   (claude-code--eval-server-start)
   ;; Create buffer
@@ -747,7 +735,7 @@ Remembers the buffer you were in so it can provide context to Claude."
       (set-process-coding-system proc 'utf-8 'utf-8))
     (pop-to-buffer buf)
     (goto-char (point-max))
-    (message "Claude Code ready.  Type at the prompt and press RET.")))
+    (message "Claude Code ready.  Type at the prompt and press RET."))))
 
 (provide 'claude-code)
 
