@@ -645,9 +645,20 @@ Type at the prompt and press RET to send.  Use C-j for newlines.
              (marker-position claude-code--input-marker))
     (buffer-substring-no-properties claude-code--input-marker (point-max))))
 
+(defun claude-code--update-origin-buffer ()
+  "Update origin buffer to the most recent file-visiting buffer."
+  (let ((buf (cl-find-if (lambda (b)
+                           (and (buffer-file-name b)
+                                (not (equal (buffer-name b)
+                                            claude-code--buffer-name))))
+                         (buffer-list))))
+    (when buf
+      (setq claude-code--origin-buffer buf))))
+
 (defun claude-code-send-input ()
   "Send the text at the input prompt to Claude."
   (interactive)
+  (claude-code--update-origin-buffer)
   (let ((input (claude-code--get-input)))
     (when (and input (not (string-empty-p (string-trim input))))
       ;; Clear the input area
@@ -687,8 +698,9 @@ Type at the prompt and press RET to send.  Use C-j for newlines.
   "Start or switch to a Claude Code session.
 Remembers the buffer you were in so it can provide context to Claude."
   (interactive)
-  ;; Remember where the user came from
-  (setq claude-code--origin-buffer (current-buffer))
+  ;; Remember where the user came from (skip chat buffer itself)
+  (unless (equal (buffer-name (current-buffer)) claude-code--buffer-name)
+    (setq claude-code--origin-buffer (current-buffer)))
   ;; If we already have a live session, just switch to it
   (if (and claude-code--process (process-live-p claude-code--process))
       (progn
