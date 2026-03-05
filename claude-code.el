@@ -48,6 +48,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'json)
 (require 'project)
 (require 'seq)
@@ -340,59 +341,151 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
   (let ((type (cdr (assq 'type msg)))
         (buf (get-buffer claude-code--buffer-name)))
     (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (let ((inhibit-read-only t))
-          (goto-char (point-max))
-          (pcase type
-            ("assistant"
-             (let* ((message (cdr (assq 'message msg)))
-                    (content (cdr (assq 'content message))))
-               (when (vectorp content)
-                 (seq-doseq (block content)
-                   (let ((block-type (cdr (assq 'type block))))
-                     (pcase block-type
-                       ("text"
-                        (let ((text (cdr (assq 'text block))))
-                          (when text
-                            (insert (propertize text 'face 'claude-code-assistant-face)))))
-                       ("tool_use"
-                        (let ((name (cdr (assq 'name block))))
-                          (insert (propertize
-                                   (format "\n[Tool: %s]\n" name)
+      (pcase type
+        ("assistant"
+         (let* ((message (cdr (assq 'message msg)))
+                (content (cdr (assq 'content message))))
+           (when (vectorp content)
+             (seq-doseq (block content)
+               (let ((block-type (cdr (assq 'type block))))
+                 (pcase block-type
+                   ("text"
+                    (let ((text (cdr (assq 'text block))))
+                      (when text
+                        (claude-code--insert-output
+                         (propertize text 'face 'claude-code-assistant-face)))))
+                   ("tool_use"
+                    (let ((name (cdr (assq 'name block))))
+                      (claude-code--insert-output
+                       (propertize (format "\n[Tool: %s]\n" name)
                                    'face 'claude-code-tool-face))))))))))
-            ("user"
-             (let* ((message (cdr (assq 'message msg)))
-                    (content (cdr (assq 'content message))))
-               (when (vectorp content)
-                 (seq-doseq (block content)
-                   (when (equal (cdr (assq 'type block)) "tool_result")
-                     (insert (propertize
-                              (format "[Tool result: %s]\n"
-                                      (truncate-string-to-width
-                                       (or (cdr (assq 'content block)) "")
-                                       200))
-                              'face 'claude-code-tool-result-face)))))))
-            ("result"
-             (insert (propertize "\n--- Done ---\n" 'face 'claude-code-separator-face))
-             (claude-code--show-prompt))
-            ("error"
-             (insert (propertize
-                      (format "\n[Error: %s]\n"
+        ("user"
+         (let* ((message (cdr (assq 'message msg)))
+                (content (cdr (assq 'content message))))
+           (when (vectorp content)
+             (seq-doseq (block content)
+               (when (equal (cdr (assq 'type block)) "tool_result")
+                 (claude-code--insert-output
+                  (propertize
+                   (format "[Tool result: %s]\n"
+                           (truncate-string-to-width
+                            (or (cdr (assq 'content block)) "") 200))
+                   'face 'claude-code-tool-result-face)))))))
+        ("result"
+         (claude-code--insert-output
+          (propertize "\n--- Done ---\n" 'face 'claude-code-separator-face)))
+        ("error"
+         (claude-code--insert-output
+          (propertize (format "\n[Error: %s]\n"
                               (or (cdr (assq 'error msg)) msg))
-                      'face 'error)))))))))
+                      'face 'error)))))))
 
 (defun claude-code--process-sentinel (proc event)
   "Sentinel for Claude CLI process PROC.  EVENT describes what happened."
-  (let ((buf (process-buffer proc)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (let ((inhibit-read-only t))
-          (goto-char (point-max))
-          (insert (propertize (format "\n[Process %s]\n" (string-trim event))
-                              'face 'claude-code-separator-face))))))
+  (when (buffer-live-p (process-buffer proc))
+    (claude-code--insert-output
+     (propertize (format "\n[Process %s]\n" (string-trim event))
+                 'face 'claude-code-separator-face)))
   ;; Clean up eval server when CLI exits
   (unless (process-live-p proc)
     (claude-code--eval-server-stop)))
+
+;; ---------------------------------------------------------------------------
+;; Context capture
+;; ---------------------------------------------------------------------------
+
+(defvar claude-code--origin-buffer nil
+  "Buffer the user was in before switching to *Claude Code*.")
+
+(defun claude-code--capture-context ()
+  "Capture context from the origin buffer for the next message.
+Returns a context string to prepend, or nil."
+  (when (and claude-code--origin-buffer
+             (buffer-live-p claude-code--origin-buffer))
+    (with-current-buffer claude-code--origin-buffer
+      (let ((parts '()))
+        (when buffer-file-name
+          (push (format "[Current file: %s, line %d]"
+                        buffer-file-name (line-number-at-pos))
+                parts))
+        (when (use-region-p)
+          (let ((sel (buffer-substring-no-properties
+                      (region-beginning) (region-end))))
+            (when (> (length sel) 0)
+              (push (format "[Selected text from %s, lines %d-%d:\n```\n%s\n```]"
+                            (or buffer-file-name (buffer-name))
+                            (line-number-at-pos (region-beginning))
+                            (line-number-at-pos (region-end))
+                            sel)
+                    parts))))
+        (when parts
+          (string-join (nreverse parts) "\n"))))))
+
+;; ---------------------------------------------------------------------------
+;; @ mention expansion
+;; ---------------------------------------------------------------------------
+
+(defun claude-code--expand-mentions (text)
+  "Expand @mentions in TEXT.
+Supported: @buffer, @selection, @file:PATH, @buffers."
+  (let ((result text))
+    ;; @file:PATH — insert file contents (do first, most specific)
+    (while (string-match "@file:\\([^ \t\n]+\\)" result)
+      (let* ((path (match-string 1 result))
+             (expanded (expand-file-name path))
+             (content (if (file-readable-p expanded)
+                          (with-temp-buffer
+                            (insert-file-contents expanded)
+                            (let ((s (buffer-string)))
+                              (if (> (length s) 10000)
+                                  (concat (substring s 0 10000) "\n[...truncated]")
+                                s)))
+                        (format "[file not found: %s]" path))))
+        (setq result (replace-regexp-in-string
+                      (regexp-quote (match-string 0 result))
+                      (format "[%s]\n```\n%s\n```" expanded content)
+                      result t t))))
+    ;; @selection — insert current selection
+    (when (string-match-p "@selection\\b" result)
+      (let ((sel (when (and claude-code--origin-buffer
+                            (buffer-live-p claude-code--origin-buffer))
+                   (with-current-buffer claude-code--origin-buffer
+                     (when (use-region-p)
+                       (buffer-substring-no-properties
+                        (region-beginning) (region-end)))))))
+        (setq result (replace-regexp-in-string
+                      "@selection\\b"
+                      (or sel "[no active selection]")
+                      result t t))))
+    ;; @buffers — list open buffers (before @buffer!)
+    (when (string-match-p "@buffers\\b" result)
+      (let ((bufs (mapconcat
+                   (lambda (b)
+                     (with-current-buffer b
+                       (when buffer-file-name
+                         (format "  %s%s"
+                                 buffer-file-name
+                                 (if (buffer-modified-p) " [modified]" "")))))
+                   (buffer-list) "\n")))
+        (setq result (replace-regexp-in-string
+                      "@buffers\\b"
+                      (format "[Open buffers:\n%s]" bufs)
+                      result t t))))
+    ;; @buffer — insert current buffer contents (truncated)
+    (when (string-match-p "@buffer\\b" result)
+      (let ((content (when (and claude-code--origin-buffer
+                                (buffer-live-p claude-code--origin-buffer))
+                       (with-current-buffer claude-code--origin-buffer
+                         (let ((s (buffer-substring-no-properties
+                                   (point-min) (point-max))))
+                           (if (> (length s) 10000)
+                               (concat (substring s 0 10000) "\n[...truncated]")
+                             s))))))
+        (setq result (replace-regexp-in-string
+                      "@buffer\\b"
+                      (format "```\n%s\n```" (or content "[no buffer]"))
+                      result t t))))
+    result))
 
 ;; ---------------------------------------------------------------------------
 ;; Sending messages
@@ -400,21 +493,27 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
 
 (defun claude-code-send (text)
   "Send TEXT as a user message to the Claude CLI process."
-  (interactive "sPrompt: ")
   (when (and claude-code--process
              (process-live-p claude-code--process))
-    (let* ((msg `((type . "user")
+    ;; Expand @mentions
+    (let* ((expanded (claude-code--expand-mentions text))
+           ;; Auto-attach context if no explicit mentions
+           (context (unless (string-match-p "@" text)
+                      (claude-code--capture-context)))
+           (full-text (if context
+                          (concat context "\n\n" expanded)
+                        expanded))
+           (msg `((type . "user")
                   (session_id . "")
                   (parent_tool_use_id . nil)
                   (message . ((role . "user")
                               (content . [((type . "text")
-                                           (text . ,text))])))))
+                                           (text . ,full-text))])))))
            (json-str (concat (claude-code--json-encode msg) "\n")))
-      (with-current-buffer (get-buffer claude-code--buffer-name)
-        (let ((inhibit-read-only t))
-          (goto-char (point-max))
-          (insert (propertize (format "\nYou: %s\n\n" text)
-                              'face 'claude-code-user-face))))
+      ;; Display user message in chat (show original, not expanded)
+      (claude-code--insert-output
+       (propertize (format "\nYou: %s\n\n" text)
+                   'face 'claude-code-user-face))
       (process-send-string claude-code--process json-str))))
 
 (defun claude-code--json-encode (obj)
@@ -451,34 +550,84 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
   "Face for separators."
   :group 'claude-code)
 
+(defface claude-code-prompt-face
+  '((t :foreground "#6cb6ff"))
+  "Face for the input prompt marker."
+  :group 'claude-code)
+
+(defvar claude-code--input-marker nil
+  "Marker for the beginning of user input area.")
+
 (defvar claude-code-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'claude-code-send-input)
     (define-key map (kbd "C-c C-c") #'claude-code-send-input)
+    (define-key map (kbd "C-j") #'newline)
     (define-key map (kbd "C-c C-k") #'claude-code-interrupt)
     (define-key map (kbd "C-c C-q") #'claude-code-quit)
+    (define-key map (kbd "C-c C-n") #'claude-code-new-session)
     map)
   "Keymap for `claude-code-mode'.")
 
-(define-derived-mode claude-code-mode special-mode "Claude-Code"
+(define-derived-mode claude-code-mode nil "Claude-Code"
   "Major mode for Claude Code chat interface.
 
-\\{claude-code-mode-map}"
-  (setq-local claude-code--partial-line ""))
+Type at the prompt and press RET to send.  Use C-j for newlines.
 
-(defun claude-code--show-prompt ()
-  "Show input prompt at the bottom of the chat buffer."
+\\{claude-code-mode-map}"
+  (setq-local claude-code--partial-line "")
+  (setq-local claude-code--input-marker (make-marker)))
+
+(defun claude-code--insert-output (text)
+  "Insert TEXT into the output area (above the input prompt)."
   (with-current-buffer (get-buffer claude-code--buffer-name)
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          (input-text (claude-code--get-input)))
+      ;; Remove the input area
+      (when (marker-position claude-code--input-marker)
+        (delete-region claude-code--input-marker (point-max)))
+      ;; Insert output
       (goto-char (point-max))
-      (insert (propertize "\n> " 'face 'minibuffer-prompt
-                          'rear-nonsticky t)))))
+      (insert text)
+      ;; Re-create the input area
+      (claude-code--insert-prompt)
+      ;; Restore any in-progress input
+      (when (and input-text (not (string-empty-p input-text)))
+        (goto-char (point-max))
+        (insert input-text))
+      ;; Scroll to bottom
+      (goto-char (point-max))
+      (let ((win (get-buffer-window (current-buffer))))
+        (when win (set-window-point win (point-max)))))))
+
+(defun claude-code--insert-prompt ()
+  "Insert the input prompt and set up the editable area."
+  (goto-char (point-max))
+  (let ((inhibit-read-only t))
+    (insert (propertize "\n" 'claude-code-separator t 'read-only t 'rear-nonsticky t))
+    (insert (propertize "Claude> " 'face 'claude-code-prompt-face
+                        'read-only t 'rear-nonsticky t
+                        'claude-code-prompt t))
+    (set-marker claude-code--input-marker (point))))
+
+(defun claude-code--get-input ()
+  "Get the current input text from the prompt area."
+  (when (and claude-code--input-marker
+             (marker-position claude-code--input-marker))
+    (buffer-substring-no-properties claude-code--input-marker (point-max))))
 
 (defun claude-code-send-input ()
-  "Read input from minibuffer and send to Claude."
+  "Send the text at the input prompt to Claude."
   (interactive)
-  (let ((input (read-string "Claude> " nil 'claude-code--input-history)))
-    (when (and input (not (string-empty-p input)))
-      (claude-code-send input))))
+  (let ((input (claude-code--get-input)))
+    (when (and input (not (string-empty-p (string-trim input))))
+      ;; Clear the input area
+      (let ((inhibit-read-only t))
+        (delete-region claude-code--input-marker (point-max)))
+      ;; Add to history
+      (push (string-trim input) claude-code--input-history)
+      ;; Send
+      (claude-code-send (string-trim input)))))
 
 (defun claude-code-interrupt ()
   "Send interrupt to Claude CLI process."
@@ -494,32 +643,50 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
   (setq claude-code--process nil)
   (claude-code--eval-server-stop))
 
+(defun claude-code-new-session ()
+  "Start a new Claude Code session, killing the current one."
+  (interactive)
+  (claude-code-quit)
+  (claude-code))
+
 ;; ---------------------------------------------------------------------------
 ;; Entry point
 ;; ---------------------------------------------------------------------------
 
 ;;;###autoload
 (defun claude-code ()
-  "Start or switch to a Claude Code session."
+  "Start or switch to a Claude Code session.
+Remembers the buffer you were in so it can provide context to Claude."
   (interactive)
+  ;; Remember where the user came from
+  (setq claude-code--origin-buffer (current-buffer))
   ;; If we already have a live session, just switch to it
   (when (and claude-code--process (process-live-p claude-code--process))
     (pop-to-buffer claude-code--buffer-name)
-    (user-error "Claude Code session already running.  Use C-c C-k to interrupt or C-c C-q to quit"))
+    (goto-char (point-max))
+    (message "Session active.  Type at the prompt and press RET to send.")
+    (cl-return-from claude-code))
   ;; Start the TCP eval server
   (claude-code--eval-server-start)
-  (message "Claude Code: eval server on port %d" claude-code--eval-server-port)
   ;; Create buffer
   (let ((buf (get-buffer-create claude-code--buffer-name)))
     (with-current-buffer buf
       (claude-code-mode)
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (propertize "Claude Code for Emacs\n" 'face '(:weight bold :height 1.2)))
-        (insert (propertize "C-c C-c to send | C-c C-k to interrupt | C-c C-q to quit\n"
-                            'face 'claude-code-separator-face))
-        (insert (propertize (make-string 60 ?─) 'face 'claude-code-separator-face))
-        (insert "\n")))
+        (insert (propertize "Claude Code for Emacs\n"
+                            'face '(:weight bold :height 1.2)
+                            'read-only t 'rear-nonsticky t))
+        (insert (propertize "RET send | C-j newline | C-c C-k interrupt | C-c C-q quit | C-c C-n new session\n"
+                            'face 'claude-code-separator-face
+                            'read-only t 'rear-nonsticky t))
+        (insert (propertize "@buffer @selection @file:path @buffers for context\n"
+                            'face 'claude-code-separator-face
+                            'read-only t 'rear-nonsticky t))
+        (insert (propertize (concat (make-string 60 ?-) "\n")
+                            'face 'claude-code-separator-face
+                            'read-only t 'rear-nonsticky t)))
+      (claude-code--insert-prompt))
     ;; Spawn Claude CLI with clean env (remove parent Claude Code vars)
     (let* ((process-environment (seq-remove
                                  (lambda (s)
@@ -539,7 +706,7 @@ If FILE-PATH is non-nil, only return diagnostics for that file."
       (set-process-coding-system proc 'utf-8 'utf-8))
     (pop-to-buffer buf)
     (goto-char (point-max))
-    (message "Claude Code session started.  Use C-c C-c to send a message.")))
+    (message "Claude Code ready.  Type at the prompt and press RET.")))
 
 (provide 'claude-code)
 

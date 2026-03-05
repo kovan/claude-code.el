@@ -397,71 +397,53 @@
 ;; Stream message handling
 ;; ---------------------------------------------------------------------------
 
+(defmacro claude-code-test--with-chat-buffer (&rest body)
+  "Set up a temporary Claude Code chat buffer and run BODY."
+  (declare (indent 0))
+  `(let ((claude-code--buffer-name "*Claude Code Test*"))
+     (with-current-buffer (get-buffer-create claude-code--buffer-name)
+       (claude-code-mode)
+       (let ((inhibit-read-only t))
+         (erase-buffer))
+       (claude-code--insert-prompt)
+       (unwind-protect
+           (progn ,@body)
+         (kill-buffer claude-code--buffer-name)))))
+
 (ert-deftest claude-code-test-handle-assistant-text ()
   "Test that assistant text messages are inserted into the buffer."
-  (let ((claude-code--buffer-name "*Claude Code Test*"))
-    (with-current-buffer (get-buffer-create claude-code--buffer-name)
-      (claude-code-mode)
-      (let ((inhibit-read-only t))
-        (erase-buffer))
-      (unwind-protect
-          (progn
-            (claude-code--handle-stream-message
-             '((type . "assistant")
-               (message . ((content . [((type . "text")
-                                        (text . "Hello from Claude!"))])))))
-            (should (string-match-p "Hello from Claude!"
-                                    (buffer-string))))
-        (kill-buffer claude-code--buffer-name)))))
+  (claude-code-test--with-chat-buffer
+    (claude-code--handle-stream-message
+     '((type . "assistant")
+       (message . ((content . [((type . "text")
+                                (text . "Hello from Claude!"))])))))
+    (should (string-match-p "Hello from Claude!" (buffer-string)))))
 
 (ert-deftest claude-code-test-handle-tool-use ()
   "Test that tool_use messages show the tool name."
-  (let ((claude-code--buffer-name "*Claude Code Test*"))
-    (with-current-buffer (get-buffer-create claude-code--buffer-name)
-      (claude-code-mode)
-      (let ((inhibit-read-only t))
-        (erase-buffer))
-      (unwind-protect
-          (progn
-            (claude-code--handle-stream-message
-             '((type . "assistant")
-               (message . ((content . [((type . "tool_use")
-                                        (name . "getOpenBuffers")
-                                        (id . "tool_123")
-                                        (input . ()))])))))
-            (should (string-match-p "\\[Tool: getOpenBuffers\\]"
-                                    (buffer-string))))
-        (kill-buffer claude-code--buffer-name)))))
+  (claude-code-test--with-chat-buffer
+    (claude-code--handle-stream-message
+     '((type . "assistant")
+       (message . ((content . [((type . "tool_use")
+                                (name . "getOpenBuffers")
+                                (id . "tool_123")
+                                (input . ()))])))))
+    (should (string-match-p "\\[Tool: getOpenBuffers\\]" (buffer-string)))))
 
 (ert-deftest claude-code-test-handle-result ()
   "Test that result messages show the done separator."
-  (let ((claude-code--buffer-name "*Claude Code Test*"))
-    (with-current-buffer (get-buffer-create claude-code--buffer-name)
-      (claude-code-mode)
-      (let ((inhibit-read-only t))
-        (erase-buffer))
-      (unwind-protect
-          (progn
-            (claude-code--handle-stream-message
-             '((type . "result")))
-            (should (string-match-p "Done" (buffer-string))))
-        (kill-buffer claude-code--buffer-name)))))
+  (claude-code-test--with-chat-buffer
+    (claude-code--handle-stream-message
+     '((type . "result")))
+    (should (string-match-p "Done" (buffer-string)))))
 
 (ert-deftest claude-code-test-handle-error ()
   "Test that error messages are displayed."
-  (let ((claude-code--buffer-name "*Claude Code Test*"))
-    (with-current-buffer (get-buffer-create claude-code--buffer-name)
-      (claude-code-mode)
-      (let ((inhibit-read-only t))
-        (erase-buffer))
-      (unwind-protect
-          (progn
-            (claude-code--handle-stream-message
-             '((type . "error")
-               (error . "something went wrong")))
-            (should (string-match-p "something went wrong"
-                                    (buffer-string))))
-        (kill-buffer claude-code--buffer-name)))))
+  (claude-code-test--with-chat-buffer
+    (claude-code--handle-stream-message
+     '((type . "error")
+       (error . "something went wrong")))
+    (should (string-match-p "something went wrong" (buffer-string)))))
 
 ;; ---------------------------------------------------------------------------
 ;; MCP config generation
@@ -483,6 +465,73 @@
             (should (cdr (assq 'command emacs-server)))
             (should (equal (cdr (assq 'CLAUDE_EMACS_PORT env)) "12345")))
         (delete-file config-file)))))
+
+;; ---------------------------------------------------------------------------
+;; @ mention expansion
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-expand-mentions-file ()
+  "Test @file:PATH expansion."
+  (let ((temp-file (make-temp-file "claude-test-")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file (insert "file contents here"))
+          (let ((result (claude-code--expand-mentions
+                         (format "look at @file:%s please" temp-file))))
+            (should (string-match-p "file contents here" result))
+            (should-not (string-match-p "@file:" result))))
+      (delete-file temp-file))))
+
+(ert-deftest claude-code-test-expand-mentions-file-not-found ()
+  "Test @file:PATH with nonexistent file."
+  (let ((result (claude-code--expand-mentions "@file:/tmp/no-such-file-99999")))
+    (should (string-match-p "file not found" result))))
+
+(ert-deftest claude-code-test-expand-mentions-buffers ()
+  "Test @buffers expansion lists open buffers."
+  (let ((temp-file (make-temp-file "claude-test-")))
+    (unwind-protect
+        (progn
+          (find-file-noselect temp-file)
+          (let ((result (claude-code--expand-mentions "show me @buffers")))
+            (should (string-match-p temp-file result))
+            (should-not (string-match-p "@buffers" result))))
+      (when-let ((buf (find-buffer-visiting temp-file)))
+        (kill-buffer buf))
+      (delete-file temp-file))))
+
+(ert-deftest claude-code-test-expand-mentions-selection-no-origin ()
+  "Test @selection with no origin buffer."
+  (let ((claude-code--origin-buffer nil))
+    (let ((result (claude-code--expand-mentions "explain @selection")))
+      (should (string-match-p "no active selection" result)))))
+
+(ert-deftest claude-code-test-expand-mentions-no-at ()
+  "Test that text without @ mentions is returned unchanged."
+  (should (equal (claude-code--expand-mentions "hello world")
+                 "hello world")))
+
+;; ---------------------------------------------------------------------------
+;; Input area
+;; ---------------------------------------------------------------------------
+
+(ert-deftest claude-code-test-input-prompt-setup ()
+  "Test that the input prompt creates an editable area."
+  (claude-code-test--with-chat-buffer
+    (should (marker-position claude-code--input-marker))
+    ;; Should be able to type after the marker
+    (goto-char (point-max))
+    (insert "test input")
+    (should (equal (claude-code--get-input) "test input"))))
+
+(ert-deftest claude-code-test-insert-output-preserves-input ()
+  "Test that inserting output preserves in-progress input."
+  (claude-code-test--with-chat-buffer
+    (goto-char (point-max))
+    (insert "my typing")
+    (claude-code--insert-output "some output\n")
+    (should (string-match-p "some output" (buffer-string)))
+    (should (equal (claude-code--get-input) "my typing"))))
 
 (provide 'claude-code-test)
 
